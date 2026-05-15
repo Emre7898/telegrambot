@@ -2,31 +2,28 @@ import requests
 import time
 import json
 from collections import deque
-from datetime import datetime
 
 TOKEN = "8740187471:AAFnbyytjPdyfudWHubh0vfu9SRpOXdna0w"
 CHAT_ID = "1030427227"
 
-# =========================
-# SYSTEM STATE
-# =========================
-
 signal_queue = deque()
-sent_markets = {}
+sent_signals = {}
+COOLDOWN = 3600  # 1 hour
+
 last_send_time = 0
 
-# =========================
-# TELEGRAM SENDER
-# =========================
 
+# =========================
+# TELEGRAM SEND
+# =========================
 def send(msg):
     global last_send_time
 
     now = time.time()
 
-    # Anti-spam delay
-    if now - last_send_time < 2:
-        time.sleep(2 - (now - last_send_time))
+    # Telegram rate limit protection
+    if now - last_send_time < 1.5:
+        time.sleep(1.5 - (now - last_send_time))
 
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
@@ -35,248 +32,142 @@ def send(msg):
             "chat_id": CHAT_ID,
             "text": msg
         })
-
         last_send_time = time.time()
 
     except Exception as e:
-        print("Telegram HATA:", e)
+        print("Telegram error:", e)
+
 
 # =========================
-# POLYMARKET FETCH
+# FETCH MARKETS
 # =========================
-
 def get_markets():
-
-    url = "https://gamma-api.polymarket.com/markets"
-
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get("https://gamma-api.polymarket.com/markets", timeout=10)
         return r.json()
-
-    except Exception as e:
-        print("API HATA:", e)
+    except:
         return []
 
-# =========================
-# DUPLICATE CONTROL
-# =========================
 
+# =========================
+# COOLDOWN CHECK
+# =========================
 def is_duplicate(market_id, side):
+    key = f"{market_id}_{side}"
 
-    if market_id not in sent_markets:
+    if key not in sent_signals:
         return False
 
-    if sent_markets[market_id] == side:
+    if time.time() - sent_signals[key] < COOLDOWN:
         return True
 
     return False
 
 
 def mark_sent(market_id, side):
-    sent_markets[market_id] = side
+    key = f"{market_id}_{side}"
+    sent_signals[key] = time.time()
+
 
 # =========================
-# SIGNAL SCORING ENGINE
+# SIGNAL ENGINE
 # =========================
-
-def calculate_confidence(volume, liquidity, yes_price):
-
-    volume_score = min(volume / 300000, 1) * 40
-    liquidity_score = min(liquidity / 500000, 1) * 30
-    edge_score = (0.5 - abs(yes_price - 0.5)) * 100
-
-    confidence = int(volume_score + liquidity_score + edge_score)
-
-    confidence = max(5, min(confidence, 95))
-
-    return confidence
-
-# =========================
-# AI-STYLE EXPLANATION
-# =========================
-
-def generate_reason(confidence, volume, liquidity):
-
-    reasons = []
-
-    if confidence >= 80:
-        reasons.append("Yüksek piyasa verimsizliği tespit edildi")
-
-    if volume > 1000000:
-        reasons.append("Anormal hacim hareketi gözlemlendi")
-
-    if liquidity > 100000:
-        reasons.append("Likidite akışı güçleniyor")
-
-    if not reasons:
-        reasons.append("Momentum ivmesi yükseliyor")
-
-    return reasons
-
-# =========================
-# SIGNAL GENERATOR
-# =========================
-
 def generate_signal(market):
 
     title = market.get("question", "No title")
     market_id = market.get("id")
 
     prices = market.get("outcomePrices")
-
     if not prices:
         return None
 
     try:
         prices = json.loads(prices)
         yes_price = float(prices[0])
-
     except:
         return None
 
     volume = float(market.get("volumeNum", 0))
     liquidity = float(market.get("liquidityNum", 0))
 
-    # Quality filters
-    if volume < 20000:
+    # filters
+    if volume < 20000 or liquidity < 3000:
         return None
 
-    if liquidity < 3000:
-        return None
-
-    confidence = calculate_confidence(volume, liquidity, yes_price)
-
-    signal_type = None
+    side = None
 
     if yes_price <= 0.45:
-        signal_type = "BUY"
-
+        side = "BUY"
     elif yes_price >= 0.55:
-        signal_type = "SELL"
-
-    if not signal_type:
+        side = "SELL"
+    else:
         return None
 
-    if is_duplicate(market_id, signal_type):
+    if is_duplicate(market_id, side):
         return None
-
-    reasons = generate_reason(confidence, volume, liquidity)
-
-    explanation = "\n• ".join(reasons)
-
-    # =========================
-    # PROFESSIONAL MESSAGE FORMAT
-    # =========================
-
-    emoji = "🟢" if signal_type == "BUY" else "🔴"
-    signal_text = "AL FIRSATI" if signal_type == "BUY" else "SATIŞ BÖLGESİ"
 
     msg = f"""
-🚨 MARKET EDGE DETECTED
+🚨 MARKET SIGNAL
 
 📌 {title}
 
-{emoji} {signal_text}
+📊 Price: {round(yes_price, 3)}
+📊 Volume: {int(volume):,}
+📊 Liquidity: {int(liquidity):,}
 
-📊 Piyasa Verileri
-• Fiyat: {round(yes_price, 3)}
-• Hacim: {int(volume):,}
-• Likidite: {int(liquidity):,}
-
-🧠 Sistem Analizi
-• {explanation}
-
-🎯 Güven Skoru: {confidence}%
-
-⏱ Zaman Dilimi: Short-term swing
+🧠 Signal: {side}
 
 #Polymarket
 """
 
-    return {
-        "market_id": market_id,
-        "side": signal_type,
-        "confidence": confidence,
-        "message": msg
-    }
+    return market_id, side, msg
+
 
 # =========================
-# MARKET SCANNER
+# SCANNER
 # =========================
-
-def scan_markets():
+def scan():
 
     print("Scanning markets...")
 
     markets = get_markets()
 
-    if not markets:
-        return
+    for m in markets:
 
-    ranked_signals = []
+        result = generate_signal(m)
 
-    for market in markets:
+        if result:
+            market_id, side, msg = result
+            signal_queue.append((market_id, side, msg))
 
-        signal = generate_signal(market)
-
-        if signal:
-            ranked_signals.append(signal)
-
-    # Highest confidence first
-    ranked_signals.sort(
-        key=lambda x: x["confidence"],
-        reverse=True
-    )
-
-    # Only top 3 signals per cycle
-    top_signals = ranked_signals[:3]
-
-    for signal in top_signals:
-
-        signal_queue.append(signal)
-
-        print(
-            f"QUEUE -> {signal['market_id']} ({signal['side']})"
-        )
 
 # =========================
-# SIGNAL DISPATCHER
+# SENDER
 # =========================
-
 def process_queue():
 
     if not signal_queue:
         return
 
-    signal = signal_queue.popleft()
+    market_id, side, msg = signal_queue.popleft()
 
-    send(signal["message"])
+    send(msg)
 
-    mark_sent(signal["market_id"], signal["side"])
+    mark_sent(market_id, side)
 
-    print(
-        f"SENT -> {signal['market_id']} ({signal['side']})"
-    )
+    print("SENT:", market_id, side)
+
 
 # =========================
-# MAIN ENGINE LOOP
+# MAIN LOOP
 # =========================
-
 while True:
 
     try:
-
-        # Scan
-        scan_markets()
-
-        # Send queue one-by-one
+        scan()
         process_queue()
-
-        # Live-feed feeling
-        time.sleep(4)
+        time.sleep(3)
 
     except Exception as e:
-
-        print("SYSTEM ERROR:", e)
-
+        print("ERROR:", e)
         time.sleep(5)

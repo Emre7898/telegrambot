@@ -1,15 +1,23 @@
 import requests
 import time
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
-TOKEN = "8740187471:AAFnbyytjPdyfudWHubh0vfu9SRpOXdna0w" 
-CHAT_ID = "1030427227"
+TOKEN =  "8740187471:AAFnbyytjPdyfudWHubh0vfu9SRpOXdna0w"
+CHAT_ID = "1030427227" 
 
-# 🧠 daha akıllı duplicate kontrol
-sent_markets = {}  # {market_id: {"side": "BUY/SELL", "time": datetime}}
+sent_markets = {}
+last_send_time = 0
+
 
 def send(msg):
+    global last_send_time
+
+    # 🧠 burst limiter (Telegram spam engel)
+    now = time.time()
+    if now - last_send_time < 1.2:
+        time.sleep(1.2 - (now - last_send_time))
+
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
     try:
@@ -17,6 +25,7 @@ def send(msg):
             "chat_id": CHAT_ID,
             "text": msg
         })
+        last_send_time = time.time()
     except Exception as e:
         print("Telegram HATA:", e)
 
@@ -32,27 +41,18 @@ def get_markets():
         return []
 
 
-# 🧠 duplicate + direction cooldown
-def is_duplicate(market_id, side, cooldown_minutes=30):
-
+def is_duplicate(market_id, side):
     if market_id not in sent_markets:
         return False
 
-    data = sent_markets[market_id]
-
-    # aynı direction ise blok
-    if data["side"] == side:
-        if datetime.utcnow() - data["time"] < timedelta(minutes=cooldown_minutes):
-            return True
+    if sent_markets[market_id] == side:
+        return True
 
     return False
 
 
-def update_sent(market_id, side):
-    sent_markets[market_id] = {
-        "side": side,
-        "time": datetime.utcnow()
-    }
+def mark_sent(market_id, side):
+    sent_markets[market_id] = side
 
 
 def generate_signal(market):
@@ -73,11 +73,9 @@ def generate_signal(market):
     volume = float(market.get("volumeNum", 0))
     liquidity = float(market.get("liquidityNum", 0))
 
-    # 🔥 kalite filtresi
     if volume < 50000 or liquidity < 10000:
         return None, None
 
-    # 🧠 confidence (daha dengeli)
     volume_score = min(volume / 200000, 1) * 40
     liquidity_score = min(liquidity / 500000, 1) * 30
     edge_score = (0.5 - abs(yes_price - 0.5)) * 100
@@ -92,8 +90,6 @@ def generate_signal(market):
 
 📌 {title}
 
-🆔 Market ID: {market_id}
-
 🟢 AL SİNYALİ
 
 💰 Giriş: {round(yes_price, 2)} - {round(yes_price + 0.03, 2)}
@@ -102,8 +98,6 @@ def generate_signal(market):
 
 📊 Hacim: {int(volume):,}
 💧 Likidite: {int(liquidity):,}
-
-⚡ Momentum / akıllı para tespit edildi.
 
 #Polymarket
 """
@@ -116,8 +110,6 @@ def generate_signal(market):
 
 📌 {title}
 
-🆔 Market ID: {market_id}
-
 🔴 SAT SİNYALİ
 
 💰 Çıkış: {round(yes_price, 2)} - {round(yes_price - 0.03, 2)}
@@ -126,8 +118,6 @@ def generate_signal(market):
 
 📊 Hacim: {int(volume):,}
 💧 Likidite: {int(liquidity):,}
-
-⚠️ Aşırı fiyatlanma tespit edildi.
 
 #Polymarket
 """
@@ -143,7 +133,7 @@ while True:
     markets = get_markets()
 
     if not markets:
-        time.sleep(10)
+        time.sleep(5)
         continue
 
     for market in markets:
@@ -156,15 +146,20 @@ while True:
 
         if signal:
 
-            # 🧠 DUPLICATE CHECK
+            # 🧠 duplicate check
             if is_duplicate(market_id, side):
-                print(f"SKIP DUPLICATE: {market_id} {side}")
                 continue
 
+            # ⚡ ANINDA GÖNDER
             send(signal)
 
             print(f"SİNYAL GÖNDERİLDİ -> {market_id} ({side})")
 
-            update_sent(market_id, side)
+            mark_sent(market_id, side)
 
+            # 🔥 BURST ENGEL (kritik)
+            time.sleep(1.5)
+
+    # 🔄 daha “live feel”
+    time.sleep(3)
     time.sleep(10)

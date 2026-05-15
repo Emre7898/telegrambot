@@ -1,29 +1,22 @@
 import requests
 import time
 import json
-from collections import deque
+from datetime import datetime
 
 TOKEN = "8740187471:AAFnbyytjPdyfudWHubh0vfu9SRpOXdna0w"
 CHAT_ID = "1030427227"
 
-signal_queue = deque()
-sent_signals = {}
-COOLDOWN = 3600  # 1 hour
-
+sent_markets = {}
 last_send_time = 0
 
 
-# =========================
-# TELEGRAM SEND
-# =========================
 def send(msg):
     global last_send_time
 
+    # 🧠 burst limiter (Telegram spam engel)
     now = time.time()
-
-    # Telegram rate limit protection
-    if now - last_send_time < 1.5:
-        time.sleep(1.5 - (now - last_send_time))
+    if now - last_send_time < 1.2:
+        time.sleep(1.2 - (now - last_send_time))
 
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
@@ -33,45 +26,35 @@ def send(msg):
             "text": msg
         })
         last_send_time = time.time()
-
     except Exception as e:
-        print("Telegram error:", e)
+        print("Telegram HATA:", e)
 
 
-# =========================
-# FETCH MARKETS
-# =========================
 def get_markets():
+    url = "https://gamma-api.polymarket.com/markets"
+
     try:
-        r = requests.get("https://gamma-api.polymarket.com/markets", timeout=10)
+        r = requests.get(url, timeout=10)
         return r.json()
-    except:
+    except Exception as e:
+        print("API HATA:", e)
         return []
 
 
-# =========================
-# COOLDOWN CHECK
-# =========================
 def is_duplicate(market_id, side):
-    key = f"{market_id}_{side}"
-
-    if key not in sent_signals:
+    if market_id not in sent_markets:
         return False
 
-    if time.time() - sent_signals[key] < COOLDOWN:
+    if sent_markets[market_id] == side:
         return True
 
     return False
 
 
 def mark_sent(market_id, side):
-    key = f"{market_id}_{side}"
-    sent_signals[key] = time.time()
+    sent_markets[market_id] = side
 
 
-# =========================
-# SIGNAL ENGINE
-# =========================
 def generate_signal(market):
 
     title = market.get("question", "No title")
@@ -79,95 +62,103 @@ def generate_signal(market):
 
     prices = market.get("outcomePrices")
     if not prices:
-        return None
+        return None, None
 
     try:
         prices = json.loads(prices)
         yes_price = float(prices[0])
     except:
-        return None
+        return None, None
 
     volume = float(market.get("volumeNum", 0))
     liquidity = float(market.get("liquidityNum", 0))
 
-    # filters
-    if volume < 20000 or liquidity < 3000:
-        return None
+    if volume < 50000 or liquidity < 10000:
+        return None, None
 
-    side = None
+    volume_score = min(volume / 200000, 1) * 40
+    liquidity_score = min(liquidity / 500000, 1) * 30
+    edge_score = (0.5 - abs(yes_price - 0.5)) * 100
 
-    if yes_price <= 0.45:
-        side = "BUY"
-    elif yes_price >= 0.55:
-        side = "SELL"
-    else:
-        return None
+    confidence = int(volume_score + liquidity_score + edge_score)
+    confidence = max(5, min(confidence, 95))
 
-    if is_duplicate(market_id, side):
-        return None
-
-    msg = f"""
-🚨 MARKET SIGNAL
+    # 🟢 BUY
+    if yes_price <= 0.40:
+        msg = f"""
+🚨 POLY SİNYAL UYARISI 🚨
 
 📌 {title}
 
-📊 Price: {round(yes_price, 3)}
-📊 Volume: {int(volume):,}
-📊 Liquidity: {int(liquidity):,}
+🟢 AL SİNYALİ
 
-🧠 Signal: {side}
+💰 Giriş: {round(yes_price, 2)} - {round(yes_price + 0.03, 2)}
+
+🎯 Güven: {confidence}%
+
+📊 Hacim: {int(volume):,}
+💧 Likidite: {int(liquidity):,}
 
 #Polymarket
 """
+        return msg, "BUY"
 
-    return market_id, side, msg
+    # 🔴 SELL
+    if yes_price >= 0.60:
+        msg = f"""
+🚨 POLY SİNYAL UYARISI 🚨
+
+📌 {title}
+
+🔴 SAT SİNYALİ
+
+💰 Çıkış: {round(yes_price, 2)} - {round(yes_price - 0.03, 2)}
+
+🎯 Güven: {confidence}%
+
+📊 Hacim: {int(volume):,}
+💧 Likidite: {int(liquidity):,}
+
+#Polymarket
+"""
+        return msg, "SELL"
+
+    return None, None
 
 
-# =========================
-# SCANNER
-# =========================
-def scan():
+while True:
 
     print("Scanning markets...")
 
     markets = get_markets()
 
-    for m in markets:
-
-        result = generate_signal(m)
-
-        if result:
-            market_id, side, msg = result
-            signal_queue.append((market_id, side, msg))
-
-
-# =========================
-# SENDER
-# =========================
-def process_queue():
-
-    if not signal_queue:
-        return
-
-    market_id, side, msg = signal_queue.popleft()
-
-    send(msg)
-
-    mark_sent(market_id, side)
-
-    print("SENT:", market_id, side)
-
-
-# =========================
-# MAIN LOOP
-# =========================
-while True:
-
-    try:
-        scan()
-        process_queue()
-        time.sleep(3)
-
-    except Exception as e:
-        print("ERROR:", e)
+    if not markets:
         time.sleep(5)
+        continue
+
+    for market in markets:
+
+        market_id = market.get("id")
+        if not market_id:
+            continue
+
+        signal, side = generate_signal(market)
+
+        if signal:
+
+            # 🧠 duplicate check
+            if is_duplicate(market_id, side):
+                continue
+
+            # ⚡ ANINDA GÖNDER
+            send(signal)
+
+            print(f"SİNYAL GÖNDERİLDİ -> {market_id} ({side})")
+
+            mark_sent(market_id, side)
+
+            # 🔥 BURST ENGEL (kritik)
+            time.sleep(1.5)
+
+    # 🔄 daha “live feel”
+    time.sleep(5)

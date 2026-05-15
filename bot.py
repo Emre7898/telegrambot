@@ -280,34 +280,3 @@ while True:
         print("SYSTEM ERROR:", e)
 
         time.sleep(5)
-```
-
-# Bu Versiyon Ne Kazandırır?
-
-## ✅ Queue Sistemi
-
-* Sinyaller toplu spam gibi görünmez
-* Tek tek akar
-* Gerçek canlı akış hissi verir
-
-## ✅ Ranking Engine
-
-* Her market gönderilmez
-* Sadece en güçlü sinyaller seçilir
-* Premium sistem hissi verir
-
-## ✅ AI-Style Açıklama
-
-* “Neden sinyal geldi?” sorusuna cevap verir
-* İnsanlarda güven oluşturur
-
-## ✅ Professional Formatting
-
-* Retail signal bot gibi görünmez
-* “Market intelligence system” hissi verir
-
-## ✅ Anti-Spam Architecture
-
-* Telegram flood engeli
-* Kontrollü gönderim
-* Daha stabil akış

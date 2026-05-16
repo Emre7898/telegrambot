@@ -6,15 +6,19 @@ from datetime import datetime
 TOKEN = "8740187471:AAFnbyytjPdyfudWHubh0vfu9SRpOXdna0w"
 CHAT_ID = "1030427227"
 
-sent_markets = {}
+sent_signals = {}
 last_send_time = 0
+
+# aynı market aynı yönü tekrar atmasın
+COOLDOWN = 3600  # 1 saat
 
 
 def send(msg):
     global last_send_time
 
-    # 🧠 burst limiter (Telegram spam engel)
+    # Telegram spam koruması
     now = time.time()
+
     if now - last_send_time < 1.2:
         time.sleep(1.2 - (now - last_send_time))
 
@@ -25,66 +29,109 @@ def send(msg):
             "chat_id": CHAT_ID,
             "text": msg
         })
+
         last_send_time = time.time()
+
     except Exception as e:
         print("Telegram HATA:", e)
 
 
 def get_markets():
+
     url = "https://gamma-api.polymarket.com/markets"
 
     try:
         r = requests.get(url, timeout=10)
         return r.json()
+
     except Exception as e:
         print("API HATA:", e)
         return []
 
 
-def is_duplicate(market_id, side):
-    if market_id not in sent_markets:
+# =========================
+# DUPLICATE + COOLDOWN
+# =========================
+def is_duplicate(fingerprint):
+
+    if fingerprint not in sent_signals:
         return False
 
-    if sent_markets[market_id] == side:
+    last_sent = sent_signals[fingerprint]
+
+    # cooldown kontrolü
+    if time.time() - last_sent < COOLDOWN:
         return True
 
     return False
 
 
-def mark_sent(market_id, side):
-    sent_markets[market_id] = side
+def mark_sent(fingerprint):
+
+    sent_signals[fingerprint] = time.time()
 
 
+# =========================
+# SIGNAL ENGINE
+# =========================
 def generate_signal(market):
 
     title = market.get("question", "No title")
     market_id = market.get("id")
 
     prices = market.get("outcomePrices")
+
     if not prices:
-        return None, None
+        return None, None, None
 
     try:
         prices = json.loads(prices)
         yes_price = float(prices[0])
+
     except:
-        return None, None
+        return None, None, None
 
     volume = float(market.get("volumeNum", 0))
     liquidity = float(market.get("liquidityNum", 0))
 
-    if volume < 50000 or liquidity < 10000:
-        return None, None
+    # 🔥 filtreler gevşetildi
+    if volume < 5000:
+        return None, None, None
+
+    if liquidity < 1000:
+        return None, None, None
 
     volume_score = min(volume / 200000, 1) * 40
     liquidity_score = min(liquidity / 500000, 1) * 30
     edge_score = (0.5 - abs(yes_price - 0.5)) * 100
 
     confidence = int(volume_score + liquidity_score + edge_score)
+
     confidence = max(5, min(confidence, 95))
 
-    # 🟢 BUY
-    if yes_price <= 0.40:
+    side = None
+
+    # 🔥 daha fazla fırsat yakalar
+    if yes_price <= 0.48:
+        side = "BUY"
+
+    elif yes_price >= 0.52:
+        side = "SELL"
+
+    else:
+        return None, None, None
+
+    # 🔥 gerçek duplicate kontrol
+    fingerprint = f"{market_id}_{side}_{round(yes_price, 2)}"
+
+    if is_duplicate(fingerprint):
+        return None, None, None
+
+    # =========================
+    # BUY
+    # =========================
+    if side == "BUY":
+
         msg = f"""
 🚨 POLY SİNYAL UYARISI 🚨
 
@@ -92,19 +139,24 @@ def generate_signal(market):
 
 🟢 AL SİNYALİ
 
-💰 Giriş: {round(yes_price, 2)} - {round(yes_price + 0.03, 2)}
+💰 Giriş Bölgesi: {round(yes_price, 2)} - {round(yes_price + 0.03, 2)}
 
-🎯 Güven: {confidence}%
+🎯 Güven Skoru: {confidence}%
 
 📊 Hacim: {int(volume):,}
 💧 Likidite: {int(liquidity):,}
 
+⚡ Momentum güçleniyor
+📈 Market baskısı artıyor
+
 #Polymarket
 """
-        return msg, "BUY"
 
-    # 🔴 SELL
-    if yes_price >= 0.60:
+    # =========================
+    # SELL
+    # =========================
+    else:
+
         msg = f"""
 🚨 POLY SİNYAL UYARISI 🚨
 
@@ -112,20 +164,25 @@ def generate_signal(market):
 
 🔴 SAT SİNYALİ
 
-💰 Çıkış: {round(yes_price, 2)} - {round(yes_price - 0.03, 2)}
+💰 Çıkış Bölgesi: {round(yes_price, 2)} - {round(yes_price - 0.03, 2)}
 
-🎯 Güven: {confidence}%
+🎯 Güven Skoru: {confidence}%
 
 📊 Hacim: {int(volume):,}
 💧 Likidite: {int(liquidity):,}
 
+⚠️ Market aşırı ısındı
+📉 Geri çekilme riski yükseliyor
+
 #Polymarket
 """
-        return msg, "SELL"
 
-    return None, None
+    return msg, side, fingerprint
 
 
+# =========================
+# MAIN LOOP
+# =========================
 while True:
 
     print("Scanning markets...")
@@ -138,27 +195,21 @@ while True:
 
     for market in markets:
 
-        market_id = market.get("id")
-        if not market_id:
-            continue
-
-        signal, side = generate_signal(market)
+        signal, side, fingerprint = generate_signal(market)
 
         if signal:
 
-            # 🧠 duplicate check
-            if is_duplicate(market_id, side):
-                continue
+            print("SIGNAL FOUND")
 
-            # ⚡ ANINDA GÖNDER
+            # ⚡ anında gönder
             send(signal)
 
-            print(f"SİNYAL GÖNDERİLDİ -> {market_id} ({side})")
+            print(f"SİNYAL GÖNDERİLDİ -> {fingerprint}")
 
-            mark_sent(market_id, side)
+            mark_sent(fingerprint)
 
-            # 🔥 BURST ENGEL (kritik)
+            # burst engel
             time.sleep(1.5)
 
-    # 🔄 daha “live feel”
+    # live feed hissi
     time.sleep(5)
